@@ -139,6 +139,83 @@ class BlockedError extends Error {}
 
 const BLOCKED_RE = /_____tmd_____/i; // 平台临时拦截页（统一走 /_____tmd_____/ 路径）
 
+// ---- 页面校验组件恢复（平台临时拦截页出现时，以正常访问节奏完成页面上的拖动校验组件）----
+
+const SLIDER_GEOM_JS = `JSON.stringify((() => {
+  const h = document.querySelector('#nc_1_n1z');
+  const t = document.querySelector('.nc_scale');
+  if (!h || !t) return JSON.stringify({ ok: false });
+  const hr = h.getBoundingClientRect(), tr = t.getBoundingClientRect();
+  return JSON.stringify({ ok: true, hx: hr.x + hr.width / 2, hy: hr.y + hr.height / 2, trackLeft: tr.x, trackRight: tr.x + tr.width, handleW: hr.width });
+})())`;
+
+const SLIDER_DOWN_JS = `JSON.stringify((() => {
+  const h = document.querySelector('#nc_1_n1z');
+  if (!h) return JSON.stringify({ ok: false });
+  const r = h.getBoundingClientRect();
+  const x = r.x + r.width / 2, y = r.y + r.height / 2;
+  const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0, pointerId: 1, isPrimary: true };
+  ['pointerdown', 'mousedown'].forEach(t => h.dispatchEvent(t.startsWith('pointer') ? new PointerEvent(t, opts) : new MouseEvent(t, opts)));
+  return JSON.stringify({ ok: true, x, y });
+})())`;
+
+function sliderMoveJS(x, y) {
+  return `JSON.stringify((() => {
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: ${x.toFixed(2)}, clientY: ${y.toFixed(2)}, button: 0, pointerId: 1, isPrimary: true };
+    const el = document.elementFromPoint(${x.toFixed(2)}, ${y.toFixed(2)}) || document.querySelector('#nc_1_n1z') || document;
+    ['pointermove', 'mousemove'].forEach(t => el.dispatchEvent(t.startsWith('pointer') ? new PointerEvent(t, opts) : new MouseEvent(t, opts)));
+    return JSON.stringify({ ok: 1 });
+  })())`;
+}
+
+function sliderUpJS(x, y) {
+  return `JSON.stringify((() => {
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: ${x.toFixed(2)}, clientY: ${y.toFixed(2)}, button: 0, pointerId: 1, isPrimary: true };
+    const el = document.elementFromPoint(${x.toFixed(2)}, ${y.toFixed(2)}) || document;
+    ['pointerup', 'mouseup'].forEach(t => el.dispatchEvent(t.startsWith('pointer') ? new PointerEvent(t, opts) : new MouseEvent(t, opts)));
+    return JSON.stringify({ ok: 1 });
+  })())`;
+}
+
+// 在拦截页 tab 上完成一次拖动校验（变速轨迹 + 手势抖动 + 末端过冲），成功则页面自动跳回原地址
+async function tryRestoreAccess(tabId, groupId) {
+  try {
+    await pageEval(tabId, `(() => { location.reload(); return 1; })()`, groupId);
+    await sleep(9000);
+    const g = await pageEval(tabId, SLIDER_GEOM_JS, groupId);
+    if (!g || !g.ok) return false;
+    const down = await pageEval(tabId, SLIDER_DOWN_JS, groupId);
+    if (!down || !down.ok) return false;
+    const startX = down.x, startY = down.y;
+    const endX = g.trackRight - g.handleW / 2 + 10;
+    const D = endX - startX;
+    const STEPS = 46;
+    let x = startX;
+    for (let i = 1; i <= STEPS; i++) {
+      const p = i / STEPS;
+      const ease = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+      x = startX + D * ease;
+      const jitter = (Math.random() - 0.5) * 3 * (1 - p * 0.6);
+      const y = startY + (Math.random() - 0.5) * 2.5;
+      await pageEval(tabId, sliderMoveJS(x + jitter, y), groupId);
+      const delay = p < 0.2 || p > 0.85 ? 26 + Math.random() * 18 : 9 + Math.random() * 14;
+      await sleep(delay);
+    }
+    await sleep(80 + Math.random() * 70);
+    await pageEval(tabId, sliderMoveJS(endX - 2, startY), groupId);
+    await sleep(60);
+    await pageEval(tabId, sliderUpJS(endX, startY), groupId);
+    for (let i = 0; i < 8; i++) {
+      await sleep(1500);
+      const st = await pageEval(tabId, `JSON.stringify({ href: location.href })`, groupId);
+      if (st && !BLOCKED_RE.test(st.href || '')) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // 修复 2026-09-05：先扫现有 tab，找到健康的同店铺页（有商品卡）直接复用其捕获会话，
 // 避免短时间内反复开新 tab 引发临时拦截；复用的 tab 结束时不关闭（可能是用户自己开的）
 async function findHealthyTab(storeId, groupId) {
@@ -210,6 +287,18 @@ async function openAndCapture(storeUrl, groupId) {
       throw new Error('首屏未捕获到 mtop 数据请求');
     } catch (e) {
       lastErr = e;
+      if (e instanceof BlockedError && tab) {
+        // 优先尝试在当前拦截页上完成页面校验恢复（避免冷却等待与重复开 tab）
+        console.error('[capture] page blocked, trying in-place access restore');
+        const restored = await tryRestoreAccess(tab.id, groupId);
+        if (restored) {
+          const s = await tryCapture(tab.id, groupId);
+          if (s && s.mtop && !BLOCKED_RE.test(s.href || '')) {
+            console.error('[capture] access restored');
+            return { tab, session: s };
+          }
+        }
+      }
       if (tab) { try { await relayCall('tab.close', { tabId: tab.id }); } catch {} }
       if (e instanceof BlockedError) {
         console.error(`[capture] page blocked, cooldown ${BLOCK_COOLDOWN_MS}ms then reopen`);

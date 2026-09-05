@@ -1,5 +1,10 @@
 ---
 name: ae-store-new-monitor
+slug: ae-store-new-monitor
+displayName: AE 店铺上新跟踪
+version: 1.0.0
+summary: 对关注的 AliExpress 店铺按上新排序跟踪公开商品列表，用销量与评价率组合判据筛出近期上架且已有订单的选品参考标的，产出分店 CSV + Markdown 报告。
+license: MIT
 description: 关注店铺上新跟踪——对 1~10 个 AliExpress 店铺的全部商品页按上新排序（new_desc）读取前 N 页公开商品数据，用「销量≥10 且评价率≤10%」的组合判据筛出「近期上架且已有订单」的选品参考标的与数据复核清单，产出分店 CSV + Markdown 报告 + 本地 firstSeen 历史。适合每天定时重复跑。触发场景：用户给出 AliExpress 店铺 all-items 链接数组，要求跟踪上新/筛新品链接。
 ---
 
