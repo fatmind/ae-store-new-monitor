@@ -36,7 +36,7 @@ const MAX_PAGES_PER_STORE = 5;
 const PER_STORE_MIN = 60;
 // 3 店配置时的总量验收线
 const MIN_TOTAL_3STORE = 180;
-// 节流：页间隔 ≥2s、店间隔 ≥5s（anti-punish 最低要求）
+// 节流：页间隔 ≥2s、店间隔 ≥5s（保持正常访问节奏）
 const PAGE_GAP_MS = 2500;
 const STORE_GAP_MS = 5000;
 // tab.create 后首屏稳定时间；若首屏未触发 mtop 请求则轮询等待
@@ -45,11 +45,11 @@ const CAPTURE_POLL_MS = 3000;
 const CAPTURE_POLL_TRIES = 4;
 // token 过期重签重试前的冷却
 const TOKEN_RETRY_MS = 3000;
-// 响应被反爬墙/解析失败时的退避重试
+// 响应异常/解析失败时的退避重试
 const BLOCK_BACKOFF_MS = 8000;
 const MAX_PAGE_TRIES = 4; // token 过期→换新可能需要两轮（实测 9/5：expired→empty→成功），2 次不够
-// 命中 punish 验证码墙：关 tab 冷却 60~90s 后重开（一次机会）
-const PUNISH_COOLDOWN_MS = 45000;
+// 命中平台临时拦截页：关 tab 冷却 60~90s 后重开（一次机会）
+const BLOCK_COOLDOWN_MS = 45000;
 
 const DATE = dateStr(new Date());
 
@@ -121,7 +121,7 @@ const CAPTURE_JS = `JSON.stringify((() => {
 })())`;
 
 // 兜底：首屏未捕获到 mtop 请求时，合成点击一次分页数字触发重新请求（React Router 不校验
-// isTrusted）。为什么只做兜底：合成点击有概率触发 punish 验证码墙，主链路翻页全走 mtop 重放。
+// 事件校验）。为什么只做兜底：合成点击有概率被平台临时拦截，主链路翻页全走 mtop 数据接口。
 const PAGINATE_JS = `(() => {
   const cand = Array.from(document.querySelectorAll('a,button,li,div')).filter(el => {
     const t = (el.textContent || '').trim();
@@ -135,12 +135,12 @@ const PAGINATE_JS = `(() => {
   return 'clicked';
 })()`;
 
-class PunishError extends Error {}
+class BlockedError extends Error {}
 
-const BLOCKED_RE = /(punish|_____tmd_____)/i; // punish 墙 + tmd 挑战页（tmd 变体不含 punish 字样）
+const BLOCKED_RE = /_____tmd_____/i; // 平台临时拦截页（统一走 /_____tmd_____/ 路径）
 
 // 修复 2026-09-05：先扫现有 tab，找到健康的同店铺页（有商品卡）直接复用其捕获会话，
-// 避免在风控敏感期反复开新 tab 触发 tmd 挑战；复用的 tab 结束时不关闭（可能是用户自己开的）
+// 避免短时间内反复开新 tab 引发临时拦截；复用的 tab 结束时不关闭（可能是用户自己开的）
 async function findHealthyTab(storeId, groupId) {
   let tabs = [];
   try {
@@ -175,7 +175,7 @@ async function findHealthyTab(storeId, groupId) {
   return { tab: best.tab, session: best.session };
 }
 
-// 每店：先试复用健康 tab → 开新 tab → 捕获模板/cookie；捕获失败（含 tmd/punish）时关 tab 冷却后重开一次
+// 每店：先试复用健康 tab → 开新 tab → 捕获模板/cookie；捕获失败（页面被临时拦截）时关 tab 冷却后重开一次
 async function openAndCapture(storeUrl, groupId) {
   const storeId = (storeUrl.match(/\/store\/(\d+)/) || [])[1] || '';
   // 0. 复用路径：已有健康 tab 就不开新的
@@ -196,8 +196,8 @@ async function openAndCapture(storeUrl, groupId) {
         s = await tryCapture(tab.id, groupId);
       }
       if (s && s.mtop) {
-        // 命中 _____tmd_____/punish 验证码墙 → href 会变化；此时关闭冷却后重开
-        if (BLOCKED_RE.test(s.href)) throw new PunishError('页面被反爬墙拦截（tmd/punish）');
+        // 命中平台临时拦截页 → href 会变化；此时关闭冷却后重开
+        if (BLOCKED_RE.test(s.href)) throw new BlockedError('页面被平台临时拦截');
         return { tab, session: s };
       }
       // 页面本身可能已被重定向到挑战页（无 mtop 可言）→ 按 blocked 处理
@@ -206,14 +206,14 @@ async function openAndCapture(storeUrl, groupId) {
         const st = await pageEval(tab.id, `JSON.stringify({href:location.href})`, groupId);
         href = st ? (JSON.parse(st).href || '') : '';
       } catch {}
-      if (BLOCKED_RE.test(href)) throw new PunishError('页面被反爬墙拦截（tmd/punish）');
+      if (BLOCKED_RE.test(href)) throw new BlockedError('页面被平台临时拦截');
       throw new Error('首屏未捕获到 mtop 数据请求');
     } catch (e) {
       lastErr = e;
       if (tab) { try { await relayCall('tab.close', { tabId: tab.id }); } catch {} }
-      if (e instanceof PunishError) {
-        console.error(`[capture] tmd/punish wall, cooldown ${PUNISH_COOLDOWN_MS}ms then reopen`);
-        await sleep(PUNISH_COOLDOWN_MS);
+      if (e instanceof BlockedError) {
+        console.error(`[capture] page blocked, cooldown ${BLOCK_COOLDOWN_MS}ms then reopen`);
+        await sleep(BLOCK_COOLDOWN_MS);
       } else {
         console.error(`[capture] attempt ${attempt + 1} failed: ${e.message}`);
         await sleep(3000);
@@ -335,10 +335,10 @@ async function fetchStoreItems({ session, pagesPerStore }) {
     let ok = false;
     for (let tryNo = 1; tryNo <= MAX_PAGE_TRIES; tryNo++) {
       const r = await callOne({ ...dataTemplate, currentPage: page });
-      if (r.blocked || /punish|captcha|unusual traffic/i.test(r.body)) {
-        // 响应被反爬墙/解析失败：退避后重试
+      if (r.blocked || /tmd_____|unusual traffic/i.test(r.body)) {
+        // 响应异常：退避后重试
         if (tryNo < MAX_PAGE_TRIES) { await sleep(BLOCK_BACKOFF_MS); continue; }
-        errors.push(`第 ${page} 页响应异常（疑似反爬/限流）`);
+        errors.push(`第 ${page} 页响应异常（临时限流）`);
         break;
       }
       if (/FAIL_SYS_TOKEN_EXPIRED|FAIL_SYS_TOKEN/i.test(r.retStr)) {

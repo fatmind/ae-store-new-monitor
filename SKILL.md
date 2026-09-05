@@ -1,13 +1,13 @@
 ---
 name: ae-store-new-monitor
-description: 对标店铺新品日常监控——对 1~10 个 AliExpress 店铺全部商品页按上新排序（new_desc）抓取前 N 页商品，用「销量≥10 且评价率≤10%」的组合判据筛出「新上架且已出单」的 ★★ 跟卖标的与疑似刷评，产出分店 CSV + Markdown 报告 + 本地 firstSeen 历史。适合每天定时重复跑。触发场景：用户给出 AliExpress 店铺 all-items 链接数组要求监控上新/找跟卖标的/筛新品链接。
+description: 关注店铺上新跟踪——对 1~10 个 AliExpress 店铺的全部商品页按上新排序（new_desc）读取前 N 页公开商品数据，用「销量≥10 且评价率≤10%」的组合判据筛出「近期上架且已有订单」的选品参考标的与数据复核清单，产出分店 CSV + Markdown 报告 + 本地 firstSeen 历史。适合每天定时重复跑。触发场景：用户给出 AliExpress 店铺 all-items 链接数组，要求跟踪上新/筛新品链接。
 ---
 
 # ae-store-new-monitor
 
 ## 功能描述
 
-对标店铺新品日常监控：对配置的若干个（默认 3 个，支持 1~10 个）AliExpress 店铺，抓取其「全部商品」列表页按 **new_desc（Newest）** 排序下的最新商品，用「销量 / 评价数」组合判据筛出「新上架且已出单」的链接（差异化跟卖标的），产出分店汇总的 CSV + Markdown 报告。纯本地脚本、**零 token**，可每天重复跑；本地 `history/<storeId>.json` 记录每个商品「首次见到日期」（firstSeen），作为新品近似的上架窗口。
+关注店铺上新跟踪：对配置的若干个（默认 3 个，支持 1~10 个）AliExpress 店铺，读取其「全部商品」列表页按 **new_desc（Newest）** 排序下的公开商品数据，用「销量 / 评价数」组合判据筛出「近期上架且已有订单」的链接（选品参考），产出分店汇总的 CSV + Markdown 报告。纯本地脚本、**零 token**，可每天重复跑；本地 `history/<storeId>.json` 记录每个商品「首次见到日期」（firstSeen），作为新品近似的上架窗口。
 
 ## 前置条件
 
